@@ -1,147 +1,173 @@
-# enrich_smr.py
-#
-# 역할:
-# 1) rs_onil_all_YYYYMMDD.csv (원본 RS 파일, _smr 없는 것만) 중
-#    가장 최신 파일을 찾는다.
-# 2) 같은 폴더의 smr_factors.csv (SMR 점수/등급, S/M/R raw/pct)와
-#    ticker 기준으로 merge한다.
-# 3) rs_onil_all_YYYYMMDD_smr.csv 이름으로 저장한다.
-#
-# 주의:
-# - rs_onil_all_YYYYMMDD_smr.csv 같은 "이미 SMR 붙은 파일"은 무시한다.
-# - *_smr_smr.csv 같은 괴물 파일은 이 스크립트에서 절대 건드리지 않는다.
+"""
+enrich_smr.py
+
+- 최신 RS 원본 파일(rs_onil_all_YYYYMMDD.csv)을 찾는다.
+- smr_factors.csv가 있으면, 거기 있는 매출성장/이익률/ROE로 SMR 점수/등급을 계산해서 병합.
+- smr_factors.csv가 없으면, 경고만 찍고
+  RS 원본에 SMR 관련 컬럼(전부 None)을 추가한 뒤 저장하고 정상 종료한다.
+"""
 
 import os
 import glob
 import pandas as pd
-
+import numpy as np
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def find_latest_base_rs() -> str:
     """
-    rs_onil_all_*.csv 중에서 '_smr'가 들어간 파일은 모두 제외하고,
-    (즉, SMR이 아직 안 붙은 순수 RS 파일만 남긴 뒤)
-    그 중 가장 최신 파일(이름 기준)을 반환한다.
+    rs_onil_all_*.csv 중에서 '_smr'가 붙지 않은 가장 최신 파일을 찾는다.
+    예: rs_onil_all_20251208.csv
     """
     pattern = os.path.join(BASE_DIR, "rs_onil_all_*.csv")
-    files = glob.glob(pattern)
+    candidates = []
 
-    # '_smr'가 이름에 포함된 것은 이미 SMR 붙인 결과물이므로 제외
-    base_files = [f for f in files if "_smr" not in os.path.basename(f)]
+    for path in glob.glob(pattern):
+        fname = os.path.basename(path)
+        # 이미 SMR가 붙은 파일은 제외 (예: rs_onil_all_20251208_smr.csv)
+        if "_smr" in fname:
+            continue
+        candidates.append(path)
 
-    if not base_files:
+    if not candidates:
         raise FileNotFoundError("rs_onil_all_*.csv (원본 RS 파일)을 찾지 못했습니다.")
 
-    base_files.sort()
-    latest = base_files[-1]
+    candidates.sort()
+    latest = candidates[-1]
     print(f"[INFO] 원본 RS 파일 선택: {os.path.basename(latest)}")
     return latest
 
 
-def load_smr_factors() -> pd.DataFrame:
+def load_smr_factors() -> pd.DataFrame | None:
     """
-    같은 폴더에 있는 smr_factors.csv 파일을 읽어온다.
-    이 파일은 이전 단계에서 만들어 둔 SMR 지표 파일이라고 가정.
+    engine/smr_factors.csv 를 읽어온다.
+    파일이 없으면 None을 반환하고, SMR은 빈 값으로만 부여한다.
     """
     smr_path = os.path.join(BASE_DIR, "smr_factors.csv")
+
     if not os.path.exists(smr_path):
-        raise FileNotFoundError(f"SMR 파일을 찾을 수 없습니다: {smr_path}")
+        print(f"[WARN] smr_factors.csv 파일이 없습니다. SMR 점수/등급은 이번 턴에서는 계산되지 않습니다.")
+        return None
 
     df = pd.read_csv(smr_path)
-    df.columns = [c.strip().lower() for c in df.columns]
 
-    required = {"ticker", "s_raw", "m_raw", "r_raw", "s_pct", "m_pct", "r_pct", "smr_score", "smr_grade"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"smr_factors.csv에 필요한 컬럼이 없습니다: {missing}")
+    # 최소한 symbol 컬럼이 있어야 함
+    if "symbol" not in df.columns:
+        raise ValueError("smr_factors.csv 에 'symbol' 컬럼이 없습니다.")
 
-    df["ticker"] = df["ticker"].astype(str).str.upper()
-    print(f"[INFO] SMR 파일 로드: {os.path.basename(smr_path)}, 종목 수: {len(df)}개")
+    print(f"[INFO] smr_factors.csv 로딩 완료. 행 수: {len(df)}")
     return df
 
 
-def merge_rs_and_smr(rs_path: str, smr_df: pd.DataFrame) -> pd.DataFrame:
+def compute_smr_score(df: pd.DataFrame) -> pd.DataFrame:
     """
-    RS 결과 파일(rs_onil_all_YYYYMMDD.csv)과 SMR 팩터를 merge하여
-    최종 df를 반환한다.
+    smr_factors 에서 sales_growth, profit_margin, roe 를 0~100 점수로 표준화해서
+    단순 평균으로 SMR 점수를 만들고, 등급(A~E)까지 부여한다.
     """
-    rs_df = pd.read_csv(rs_path)
-    rs_df.columns = [c.strip().lower() for c in rs_df.columns]
+    work = df.copy()
 
-    if "ticker" not in rs_df.columns:
-        raise ValueError("RS 파일에 'ticker' 컬럼이 없습니다.")
+    # 필요한 컬럼이 없으면 그냥 NaN으로 채운다.
+    for col in ["sales_growth", "profit_margin", "roe"]:
+        if col not in work.columns:
+            work[col] = np.nan
 
-    rs_df["ticker"] = rs_df["ticker"].astype(str).str.upper()
+    # 각 지표별로 순위(0~100) 계산
+    def rank_to_0_100(series: pd.Series) -> pd.Series:
+        valid = series.dropna()
+        if valid.empty:
+            return pd.Series(np.nan, index=series.index)
 
-    print(f"[INFO] RS 파일 로드: {os.path.basename(rs_path)}, 종목 수: {len(rs_df)}개")
+        # 높은 값이 좋은 것: rank(ascending=False)
+        ranks = valid.rank(method="average", ascending=False)
+        pct = (1 - (ranks - 1) / (len(valid) - 1)) * 100  # 0~100
+        out = pd.Series(np.nan, index=series.index)
+        out.loc[valid.index] = pct
+        return out
 
-    merged = pd.merge(
-        rs_df,
-        smr_df,
-        on="ticker",
-        how="left",
-        suffixes=("", "_smrdup"),
-    )
+    work["score_sales"] = rank_to_0_100(work["sales_growth"])
+    work["score_margin"] = rank_to_0_100(work["profit_margin"])
+    work["score_roe"] = rank_to_0_100(work["roe"])
 
-    # 혹시라도 중복 접미사 붙은 컬럼 있으면 정리
-    dup_cols = [c for c in merged.columns if c.endswith("_smrdup")]
-    if dup_cols:
-        print(f"[INFO] 중복 SMR 컬럼 제거: {dup_cols}")
-        merged = merged.drop(columns=dup_cols)
+    # 3개 점수 평균
+    work["smr_score"] = work[["score_sales", "score_margin", "score_roe"]].mean(axis=1)
 
-    print(f"[INFO] merge 완료. 최종 종목 수: {len(merged)}개")
-    return merged
+    # 등급 A~E 부여
+    def to_grade(score: float) -> str | None:
+        if pd.isna(score):
+            return None
+        if score >= 80:
+            return "A"
+        elif score >= 60:
+            return "B"
+        elif score >= 40:
+            return "C"
+        elif score >= 20:
+            return "D"
+        else:
+            return "E"
 
+    work["smr_grade"] = work["smr_score"].apply(to_grade)
 
-def build_output_path(rs_path: str) -> str:
-    """
-    입력 RS 파일명(rs_onil_all_YYYYMMDD.csv)에서 날짜 부분을 추출해
-    rs_onil_all_YYYYMMDD_smr.csv 형태의 출력 경로를 만든다.
-    """
-    base = os.path.basename(rs_path)  # 예: rs_onil_all_20251207.csv
-    name, ext = os.path.splitext(base)
-
-    # "rs_onil_all_" 이후 8자리(YYYYMMDD)를 잡는다.
-    # 혹시 형식이 조금 달라도 안전하게 처리하려고 함.
-    date_part = ""
-    prefix = "rs_onil_all_"
-    if name.startswith(prefix):
-        rest = name[len(prefix) :]  # 20251207
-        date_part = rest[:8]
-    else:
-        # 형식이 다를 경우 그냥 전체 이름에 _smr 붙인다.
-        date_part = ""
-
-    if date_part and len(date_part) == 8:
-        out_name = f"rs_onil_all_{date_part}_smr.csv"
-    else:
-        out_name = f"{name}_smr.csv"
-
-    out_path = os.path.join(BASE_DIR, out_name)
-    print(f"[INFO] 출력 파일명: {out_name}")
-    return out_path
+    return work
 
 
 def main():
     print("=== RS + SMR 병합 시작 (enrich_smr.py) ===")
 
-    # 1) 원본 RS 파일 찾기 (_smr 없는 것만)
-    rs_path = find_latest_base_rs()
+    # 1) 최신 RS 원본 파일 찾기
+    base_rs_path = find_latest_base_rs()
+    rs_df = pd.read_csv(base_rs_path)
 
-    # 2) SMR 팩터 로딩
-    smr_df = load_smr_factors()
+    if "symbol" not in rs_df.columns:
+        raise ValueError("RS 원본 파일에 'symbol' 컬럼이 없습니다.")
 
-    # 3) merge
-    merged_df = merge_rs_and_smr(rs_path, smr_df)
+    # 2) SMR 팩터 로딩 시도
+    smr_factors = load_smr_factors()
 
-    # 4) 출력 경로 결정 & 저장
-    out_path = build_output_path(rs_path)
-    merged_df.to_csv(out_path, index=False, encoding="utf-8-sig")
+    if smr_factors is None:
+        # SMR 팩터 파일이 없다면, RS만 유지하고 SMR 관련 컬럼은 전부 None으로 추가
+        print("[WARN] smr_factors.csv 미존재: SMR 점수/등급은 비워놓고 파일을 저장합니다.")
+        enriched = rs_df.copy()
+        for col in [
+            "sales_growth",
+            "profit_margin",
+            "roe",
+            "smr_score",
+            "smr_grade",
+        ]:
+            if col not in enriched.columns:
+                enriched[col] = np.nan
 
-    print(f"[DONE] 최종 파일 저장: {out_path}")
-    print("=== RS + SMR 병합 완료 ===")
+        out_path = base_rs_path.replace(".csv", "_smr.csv")
+        enriched.to_csv(out_path, index=False, encoding="utf-8-sig")
+        print(f"[INFO] SMR 없이 RS만 포함된 파일 저장 완료: {os.path.basename(out_path)}")
+        print("=== RS + SMR 병합 종료 (SMR 없음, 경고만) ===")
+        return
+
+    # 3) SMR 점수/등급 계산
+    smr_scored = compute_smr_score(smr_factors)
+
+    # symbol 기준으로 머지
+    merged = pd.merge(
+        rs_df,
+        smr_scored[["symbol", "sales_growth", "profit_margin", "roe", "smr_score", "smr_grade"]],
+        on="symbol",
+        how="left",
+        suffixes=("", "_smrdup"),
+    )
+
+    # 혹시라도 중복 칼럼이 생겼으면 정리
+    dup_cols = [c for c in merged.columns if c.endswith("_smrdup")]
+    if dup_cols:
+        merged = merged.drop(columns=dup_cols)
+
+    # 4) 출력 파일 이름: rs_onil_all_YYYYMMDD_smr.csv
+    out_path = base_rs_path.replace(".csv", "_smr.csv")
+    merged.to_csv(out_path, index=False, encoding="utf-8-sig")
+
+    print(f"[INFO] RS+SMR 병합 파일 저장 완료: {os.path.basename(out_path)}")
+    print("=== RS + SMR 병합 종료 ===")
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ SLEEP_BETWEEN_BATCHES = 3
 
 # RS 계산에 필요한 건 12개월 수익률이므로,
 # 여유를 두고 최근 400 거래일 정도만 받도록 설정 (대략 1년 반 수준)
-DAYS_BACK = 400
+DAYS_BACK = 2000
 
 
 def load_universe(path: str) -> list[str]:

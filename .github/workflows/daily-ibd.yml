@@ -2,7 +2,7 @@ name: US IBD Daily Engine
 
 on:
   schedule:
-    # 매일 21:00 UTC (한국시간 KST+9 기준으로 아침 06:00)
+    # 매일 21:00 UTC (한국시간 KST+9 기준 06:00)
     - cron: "0 21 * * *"
   workflow_dispatch: {}
 
@@ -32,16 +32,19 @@ jobs:
           echo "[STEP 1] Fetch US universe"
           python fetch_us_universe.py
 
-          echo "[STEP 2] Download price data"
+          echo "[STEP 2] Download price data (5 years)"
           python download_prices.py
 
           echo "[STEP 3] Calc RS (O'Neil style)"
           python calc_rs_onil.py
 
-          echo "[STEP 4] Enrich SMR"
+          echo "[STEP 4] Build SMR factors from fundamentals"
+          python build_smr_factors.py
+
+          echo "[STEP 5] Enrich RS with SMR"
           python enrich_smr.py
 
-          echo "[STEP 5] Clean old summary files"
+          echo "[STEP 6] Clean old summary files"
           python clean_old_files.py
 
       - name: Copy latest CSVs into data/ (latest_rs_smr.csv, latest_industry_rs.csv)
@@ -51,8 +54,9 @@ jobs:
           import glob
           import shutil
 
-          repo_root = os.path.dirname(os.path.abspath(__file__))  # .../.github/workflows
-          repo_root = os.path.dirname(os.path.dirname(repo_root)) # 레포 루트
+          # 현재 파일(.github/workflows) 기준으로 레포 루트 찾기
+          workflow_dir = os.path.dirname(os.path.abspath(__file__))
+          repo_root = os.path.dirname(os.path.dirname(workflow_dir))
 
           engine_dir = os.path.join(repo_root, "engine")
           data_dir = os.path.join(repo_root, "data")
@@ -92,11 +96,11 @@ jobs:
           git status --porcelain data
 
           # 변경 사항 없으면 종료
-          if [ -z "$(git status --porcelain data)" ]; then
+          if [ -z "$(git.status --porcelain data)" ]; then
             echo "[INFO] data 폴더에 변경 사항 없음. 커밋/푸시 생략."
             exit 0
           fi
 
           git add data/latest_rs_smr.csv data/latest_industry_rs.csv
-          git commit -m "daily engine update (GitHub Actions)"
-          git push origin ${{ github.ref_name }}
+          git.commit -m "daily engine update (GitHub Actions)"
+          git.push origin ${{ github.ref_name }}

@@ -7,12 +7,11 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-
 UNIVERSE_FILE = "us_universe.csv"
 OUT_DIR = "."
-PRICE_PERIOD = "500d"  # ~ 1.5년, 12개월 수익률 계산에 충분
-CHUNK_SIZE = 200       # 한번에 요청할 티커 수 (전체가 아니라 요청 단위일 뿐)
-SLEEP_SEC = 1.0        # 청크 사이 딜레이 (레이트 리밋 완화용)
+PRICE_PERIOD = "500d"  # ~ 1.5년
+CHUNK_SIZE = 200       # 한번에 요청할 티커 수
+SLEEP_SEC = 1.0        # 청크 사이 딜레이
 
 
 def load_universe(path: str) -> pd.DataFrame:
@@ -38,7 +37,7 @@ def load_universe(path: str) -> pd.DataFrame:
             f"유니버스 파일에서 티커 컬럼(symbol/ticker)을 찾지 못했습니다. 현재 컬럼: {list(df.columns)}"
         )
 
-    # 내부적으로는 'symbol'로 통일
+    # 내부적으로 'symbol'로 통일
     if symbol_col != "symbol":
         df = df.rename(columns={symbol_col: "symbol"})
 
@@ -78,60 +77,80 @@ def download_prices_chunk(tickers: List[str]) -> Dict[str, pd.DataFrame]:
     yfinance로 여러 티커를 한 번에 다운로드.
     반환값: {티커: DataFrame(OHLCV)}
     """
+    result: Dict[str, pd.DataFrame] = {}
+
     if not tickers:
-        return {}
+        return result
 
     tickers_str = " ".join(tickers)
-    # auto_adjust=True 로 분할/배당 반영된 Adjusted price 사용
-    data = yf.download(
-        tickers=tickers_str,
-        period=PRICE_PERIOD,
-        interval="1d",
-        group_by="ticker",
-        auto_adjust=True,
-        threads=True,
-    )
+    print(f"[DEBUG] yfinance.download 호출: {tickers_str[:80]}... (총 {len(tickers)}개)")
 
-    result: Dict[str, pd.DataFrame] = {}
+    try:
+        data = yf.download(
+            tickers=tickers_str,
+            period=PRICE_PERIOD,
+            interval="1d",
+            group_by="ticker",
+            auto_adjust=True,
+            threads=True,
+        )
+    except Exception as e:
+        print(f"[ERROR] yfinance.download 예외 발생: {e}")
+        return result
+
+    if data is None or len(data) == 0:
+        print("[WARN] yfinance에서 빈 데이터 프레임 반환")
+        return result
 
     # MultiIndex 인지 여부 체크
     if isinstance(data.columns, pd.MultiIndex):
         # data[ticker] 가 각 티커별 서브프레임
+        top_level = list(dict.fromkeys(data.columns.get_level_values(0)))
+        print(f"[DEBUG] MultiIndex 컬럼 티커 수: {len(top_level)}")
+
         for t in tickers:
-            if t in data.columns.get_level_values(0):
-                try:
-                    px = data[t].copy()
-                    # 칼럼 이름 정리
-                    px = px.rename(
-                        columns={
-                            "Open": "open",
-                            "High": "high",
-                            "Low": "low",
-                            "Close": "close",
-                            "Adj Close": "close",
-                            "Volume": "volume",
-                        }
-                    )
-                    px = px.reset_index().rename(columns={"Date": "date"})
-                    result[t] = px
-                except Exception:
-                    continue
+            if t not in top_level:
+                print(f"  [SKIP] {t}: MultiIndex 컬럼에 없음")
+                continue
+            try:
+                px = data[t].copy()
+                px = px.rename(
+                    columns={
+                        "Open": "open",
+                        "High": "high",
+                        "Low": "low",
+                        "Close": "close",
+                        "Adj Close": "close",
+                        "Volume": "volume",
+                    }
+                )
+                px = px.reset_index().rename(columns={"Date": "date"})
+                result[t] = px
+            except Exception as e:
+                print(f"  [SKIP] {t}: 개별 티커 데이터 처리 중 예외 {e}")
+                continue
     else:
         # 단일 티커일 때
+        print("[DEBUG] 단일 티커 데이터 구조 감지")
+        if len(tickers) != 1:
+            print("[WARN] tickers는 여러 개인데 data는 단일 구조입니다.")
         t = tickers[0]
-        px = data.copy()
-        px = px.rename(
-            columns={
-                "Open": "open",
-                "High": "high",
-                "Low": "low",
-                "Close": "close",
-                "Adj Close": "close",
-                "Volume": "volume",
-            }
-        )
-        px = px.reset_index().rename(columns={"Date": "date"})
-        result[t] = px
+        try:
+            px = data.copy()
+            px = px.rename(
+                columns={
+                    "Open": "open",
+                    "High": "high",
+                    "Low": "low",
+                    "Close": "close",
+                    "Adj Close": "close",
+                    "Volume": "volume",
+                }
+            )
+            px = px.reset_index().rename(columns={"Date": "date"})
+            result[t] = px
+        except Exception as e:
+            print(f"  [SKIP] {t}: 단일 구조 처리 중 예외 {e}")
 
     return result
 
@@ -144,9 +163,8 @@ def calc_returns_from_prices(px: pd.DataFrame):
     if "date" not in px.columns or "close" not in px.columns:
         return None
 
-    # 날짜 정렬
     px = px.sort_values("date").reset_index(drop=True)
-    if px["close"].notna().sum() < 80:  # 최소 3개월은 있어야 의미 있음
+    if px["close"].notna().sum() < 80:  # 최소 3개월 이상 데이터 필요
         return None
 
     last_idx = px.index[px["close"].last_valid_index()]
@@ -161,19 +179,17 @@ def calc_returns_from_prices(px: pd.DataFrame):
             return np.nan
         return float(last_close / base - 1.0)
 
-    # 대략적 거래일 기준 (3,6,9,12개월)
+    # 대략적 거래일 기준
     ret_3m = ret_n(63)
     ret_6m = ret_n(126)
     ret_9m = ret_n(189)
     ret_12m = ret_n(252)
 
-    # 거래량 지표
-    vol = px["volume"]
-    vol = pd.to_numeric(vol, errors="coerce")
+    vol = pd.to_numeric(px.get("volume"), errors="coerce")
     avg_vol_50 = float(vol.tail(50).mean()) if vol.notna().sum() > 0 else np.nan
     avg_dollar_vol_50 = float(avg_vol_50 * last_close) if not np.isnan(avg_vol_50) else np.nan
 
-    # 오닐식 가중 수익률 (12m*3 + 9m*2 + 6m + 3m) / 7
+    # 오닐식 가중 수익률
     weights = []
     vals = []
     for r, w in [(ret_12m, 3), (ret_9m, 2), (ret_6m, 1), (ret_3m, 1)]:
@@ -200,22 +216,12 @@ def calc_returns_from_prices(px: pd.DataFrame):
 
 
 def rs_scale(series: pd.Series, max_score: int = 99) -> pd.Series:
-    """
-    백분위 순위 → 0~max_score 점수로 변환
-    """
     s = series.copy()
     s = s.replace([np.inf, -np.inf], np.nan)
-    s = s.dropna()
-    if s.empty:
-        return pd.Series(index=series.index, dtype=float)
-
-    return series.rank(pct=True) * max_score
+    return s.rank(pct=True) * max_score
 
 
 def build_industry_rs(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    종목 RS 결과에 group_key를 붙여 산업군 RS/랭크/등급 계산
-    """
     if "group_key" not in df.columns:
         df["group_key"] = "Unknown"
 
@@ -227,15 +233,12 @@ def build_industry_rs(df: pd.DataFrame) -> pd.DataFrame:
         avg_weighted_ret=("onil_weighted_ret", "mean"),
     ).reset_index()
 
-    # 산업군 RS는 가중 수익률 기반 백분위
     ind["group_rs_100"] = ind["avg_weighted_ret"].rank(pct=True) * 100
     ind["group_rs_99"] = ind["avg_weighted_ret"].rank(pct=True) * 99
 
-    # 랭크 (높은 RS가 1등)
     ind = ind.sort_values("group_rs_100", ascending=False)
     ind["group_rank"] = range(1, len(ind) + 1)
 
-    # 등급 A~E
     def grade_func(score):
         if np.isnan(score):
             return "E"
@@ -250,7 +253,7 @@ def build_industry_rs(df: pd.DataFrame) -> pd.DataFrame:
         return "E"
 
     ind["group_grade"] = ind["group_rs_100"].apply(grade_func)
-    ind = ind.rename(columns={"avg_weighted_ret": "group_rs_6m"})  # 호환성 유지
+    ind = ind.rename(columns={"avg_weighted_ret": "group_rs_6m"})
 
     return ind
 
@@ -273,12 +276,8 @@ def main():
     for i in range(0, total, CHUNK_SIZE):
         chunk = tickers[i : i + CHUNK_SIZE]
         print(f"[CHUNK] {i+1} ~ {min(i+CHUNK_SIZE, total)} 티커 다운로드 중...")
-        try:
-            prices_dict = download_prices_chunk(chunk)
-        except Exception as e:
-            print(f"[ERROR] 청크 다운로드 실패: {e}")
-            time.sleep(SLEEP_SEC)
-            continue
+
+        prices_dict = download_prices_chunk(chunk)
 
         for t in chunk:
             px = prices_dict.get(t)
@@ -293,12 +292,10 @@ def main():
 
             rec = {"symbol": t}
             rec.update(metrics)
-            # group_key 붙이기
             g = uni.loc[uni["symbol"] == t, "group_key"]
             rec["group_key"] = g.iloc[0] if not g.empty else "Unknown"
             records.append(rec)
 
-        # 레이트 리밋 완화
         time.sleep(SLEEP_SEC)
 
     if not records:
@@ -308,14 +305,11 @@ def main():
     df = pd.DataFrame(records)
     print(f"[INFO] RS 계산 완료 티커 수: {len(df)}")
 
-    # RS 점수 (0~99)
     df["rs_onil_99"] = rs_scale(df["onil_weighted_ret"], max_score=99)
     df["rs_onil"] = df["rs_onil_99"]
 
-    # 산업군 RS 계산
     ind_df = build_industry_rs(df)
 
-    # 산업군 정보 merge
     df = df.merge(
         ind_df[
             [
@@ -333,7 +327,6 @@ def main():
         how="left",
     )
 
-    # 컬럼 정렬 (기존 파일과 최대한 호환)
     cols = [
         "symbol",
         "last_date",
@@ -361,7 +354,6 @@ def main():
     df.to_csv(out_rs, index=False, encoding="utf-8-sig")
     print(f"[INFO] 종목 RS 파일 저장 완료: {out_rs}")
 
-    # 산업군 요약은 별도 파일로 저장
     ind_df.to_csv(out_ind, index=False, encoding="utf-8-sig")
     print(f"[INFO] 산업군 RS 파일 저장 완료: {out_ind}")
     print("=== US IBD RS (O'Neil style) 계산 종료 ===")

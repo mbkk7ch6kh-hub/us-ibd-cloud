@@ -1,38 +1,3 @@
-name: US IBD Daily Engine
-
-on:
-  schedule:
-    # 매일 07:00 KST ≒ 22:00 UTC
-    - cron: "0 22 * * *"
-  workflow_dispatch:
-
-permissions:
-  contents: write
-
-jobs:
-  run-engine:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          if [ -f "engine/requirements.txt" ]; then
-            cd engine
-            pip install -r requirements.txt
-          elif [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt
-          else
-            pip install pandas numpy yfinance openpyxl requests python-dateutil
-          fi
-
       - name: Run US IBD engine (RS + Industry RS + SMR)
         working-directory: ./engine
         run: |
@@ -42,23 +7,21 @@ jobs:
           echo "[STEP 1.5] Enrich universe with industry info"
           python enrich_universe_industry.py
 
-          echo "[STEP 2] Download price data (5 years)"
-          python download_prices.py
-
-          echo "[STEP 3] Calc RS (O'Neil style)"
+          echo "[STEP 2] Calc RS (O'Neil style, cloud-optimized)"
           python calc_rs_onil.py
 
-          echo "[STEP 4] Build SMR factors from fundamentals"
+          echo "[STEP 3] Build SMR factors from fundamentals"
           python build_smr_factors.py
 
-          echo "[STEP 5] Enrich RS with SMR"
+          echo "[STEP 4] Enrich RS with SMR"
           python enrich_smr.py
 
-          echo "[STEP 6] Clean old summary files"
+          echo "[STEP 5] Clean old summary files"
           python clean_old_files.py
 
-          echo "[STEP 7] Export latest CSVs to data/"
+          echo "[STEP 6] Export latest CSVs to data/"
           python export_latest_to_cloud.py
+
 
       - name: Commit & push updated data
         env:

@@ -36,11 +36,14 @@ jobs:
           fi
 
       # 4) 엔진 실행 (유니버스 → 가격 → RS → SMR → 정리)
-      - name: Run US IBD engine (RS + Industry RS + SMR)
+          - name: Run US IBD engine (RS + Industry RS + SMR)
         working-directory: ./engine
         run: |
           echo "[STEP 1] Fetch US universe"
           python fetch_us_universe.py
+
+          echo "[STEP 1.5] Enrich universe with industry info"
+          python enrich_universe_industry.py
 
           echo "[STEP 2] Download price data (5 years)"
           python download_prices.py
@@ -56,6 +59,10 @@ jobs:
 
           echo "[STEP 6] Clean old summary files"
           python clean_old_files.py
+
+          echo "[STEP 7] Export latest CSVs to data/"
+          python export_latest_to_cloud.py
+
 
       # 5) engine/ 안에서 최신 rs_onil_all_*_smr.csv / industry_rs_*.csv 찾아서 data/로 복사
       - name: Copy latest CSVs into data

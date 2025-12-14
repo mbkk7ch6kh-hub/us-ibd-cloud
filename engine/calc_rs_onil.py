@@ -157,39 +157,80 @@ def download_prices_chunk(tickers: List[str]) -> Dict[str, pd.DataFrame]:
 
 def calc_returns_from_prices(px: pd.DataFrame):
     """
-    px: columns = [date, open, high, low, close, volume]
-    3, 6, 9, 12개월 수익률과 보조 지표 계산
+    px: columns 에서 'close' 역할을 하는 컬럼을 찾아
+    3, 6, 9, 12개월 수익률과 보조 지표를 계산한다.
+    - 'close' 중복 컬럼(Adj Close 등)도 안전하게 처리
     """
-    if "date" not in px.columns or "close" not in px.columns:
+    if "date" not in px.columns:
+        if "Date" in px.columns:
+            px = px.rename(columns={"Date": "date"})
+        else:
+            return None
+
+    # 1) 종가 역할을 하는 컬럼 찾기
+    close_candidate = None
+
+    if "close" in px.columns:
+        close_candidate = px["close"]
+    else:
+        # 이름에 'close' 가 들어가는 첫 번째 컬럼을 후보로 사용
+        for c in px.columns:
+            if isinstance(c, str) and "close" in c.lower():
+                close_candidate = px[c]
+                break
+
+    if close_candidate is None:
+        # 종가 역할을 하는 컬럼을 찾지 못하면 해당 티커는 스킵
         return None
 
+    # 2) close_candidate 가 DataFrame 이면 첫 번째 컬럼만 사용
+    if isinstance(close_candidate, pd.DataFrame):
+        # 열이 여러 개일 때 맨 앞 열 사용
+        close_series = close_candidate.iloc[:, 0]
+    else:
+        close_series = close_candidate
+
+    # 숫자로 강제 변환
+    close_series = pd.to_numeric(close_series, errors="coerce")
+
+    # 원본 프레임 복사 후, 사용할 종가를 별도 컬럼으로 고정
+    px = px.copy()
+    px["close_used"] = close_series
+
+    # 3) 날짜 정렬
     px = px.sort_values("date").reset_index(drop=True)
-    if px["close"].notna().sum() < 80:  # 최소 3개월 이상 데이터 필요
+
+    valid_close = px["close_used"].notna()
+
+    # 최소 데이터 길이 체크 (대략 3개월 이상 필요)
+    if valid_close.sum() < 80:
         return None
 
-    last_idx = px.index[px["close"].last_valid_index()]
-    last_close = float(px.loc[last_idx, "close"])
+    last_idx = px.index[valid_close].max()
+    last_close = float(px.loc[last_idx, "close_used"])
     last_date = pd.to_datetime(px.loc[last_idx, "date"]).date()
 
     def ret_n(days: int):
-        if last_idx - days < 0:
+        idx = last_idx - days
+        if idx < 0:
             return np.nan
-        base = px.loc[last_idx - days, "close"]
+        base = px.loc[idx, "close_used"]
         if pd.isna(base) or base == 0:
             return np.nan
         return float(last_close / base - 1.0)
 
-    # 대략적 거래일 기준
+    # 대략적 거래일 기준 (3, 6, 9, 12개월)
     ret_3m = ret_n(63)
     ret_6m = ret_n(126)
     ret_9m = ret_n(189)
     ret_12m = ret_n(252)
 
+    # 거래량 지표
     vol = pd.to_numeric(px.get("volume"), errors="coerce")
     avg_vol_50 = float(vol.tail(50).mean()) if vol.notna().sum() > 0 else np.nan
     avg_dollar_vol_50 = float(avg_vol_50 * last_close) if not np.isnan(avg_vol_50) else np.nan
 
-    # 오닐식 가중 수익률
+    # 오닐식 가중 수익률 (12m*3 + 9m*2 + 6m + 3m) / 7
     weights = []
     vals = []
     for r, w in [(ret_12m, 3), (ret_9m, 2), (ret_6m, 1), (ret_3m, 1)]:

@@ -47,13 +47,6 @@ jobs:
           SIMFIN_API_KEY: ${{ secrets.SIMFIN_API_KEY }}
         run: |
           python engine2/enrich_universe_simfin.py
-    
-      - name: Yahoo fallback (fill missing group_key gradually)
-        env:
-          YAHOO_MAX_PER_RUN: "250"
-          YAHOO_SLEEP_SEC: "0.6"
-
-        run: python engine2/enrich_universe_yahoo_fallback.py
 
       - name: Audit industry coverage
         run: python engine2/audit_universe_industry_coverage.py
